@@ -1,0 +1,373 @@
+---
+title: "Assessment of US Storm Hazards - the Most Damaging Events"
+output: html_document
+---
+
+## Synopsis
+<!--Immediately after the title, there should be a synopsis which describes and summarizes your analysis in at most 10 complete sentences.-->
+I explore **the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database** to establish which events have the biggest impact on U.S. population health and economy. The dataset is checked for major errors and these are corrected. Events are assigned to types that are partially standardized.
+
+The results show that **tornades** are by far the most detrimental for the population health. **Thunderstorm winds, excessive heat and floods** follow but their impact is several times smaller. In terms of economic impact **hurricanes** incur the biggest damage, followed by **tornadoes, storm surges/tides and floods**.
+
+<!--Requirements:
+- Data Processing and Results are required.
+- at least one figure containing a plot.
+- no more than three figures. Figures may have multiple plots in them (i.e. panel plots), but there cannot be more than three figures total.
+- show all your code for the work in your analysis document. This may make the document a bit verbose, but that is okay. In general, you should ensure that echo = TRUE for every code chunk (this is the default setting in knitr).-->
+
+## Data Processing
+<!--describes (in words and code)
+- how the data were loaded into R and processed for analysis.
+- your analysis must start from the raw CSV file containing the data
+- If preprocessing is time-consuming you may consider using the cache = TRUE option for certain code chunks.-->
+
+### Reading and checking the data
+#### Reading data
+```{r, cache=TRUE}
+file <- "StormData.csv.bz2"
+data <- read.csv(file)
+```
+#### Checking Event Type Column
+```{r, cache=TRUE}
+str(data$EVTYPE)
+```
+985 is too much. Official list contains only 48 event types. Following offical event list is taken from the [Storm Data Preparation directive](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf), p.6:
+```{r, cache=TRUE}
+events <- read.table("event_list_raw.txt", sep=";", col.names = "Event.Type")
+sapply(events, function(x) substr(x, 1, regexpr(" [A-Z]$", x) - 1))
+```
+Event list should be standardized to conform to the offical list before one can decide which event types make the biggest impact. For this end I don't apply any automatic string transformation. Instead I use a **manual method**:
+
+1. selecting the EVTYPE's of the biggest impact on health or economy
+2. standardizing them
+3. recalculating impact for these standardized event types
+
+To be sure this approach allows corret identification of the most deterimental event types I will compare the resulting ordering of event types with the impact of the left out, unstandardize EVTYPE's. We will check if standardizing these other EVTYPE's might change the ordering at the top of the even type list.
+
+To apply this method I need to **first check and clean the numerical measures of damage**.
+
+#### Checking Exponents
+
+The numerical values describing damage are also doubtful in many cases. To correct the errors I **check the top highest numbers** as these have the biggest impact on the ordering of event types.
+
+##### 1. Checking PROPDMGEXP
+
+Let's print and review the exponent values.
+
+```{r, cache=TRUE}
+unique(data$PROPDMGEXP)
+```
+
+We see the some checking and cleaning should be done:
+
+* check the biggest exponents i.e. B,8,7
+* change letters into numbers
+* change "\ " (space) into 0
+* eliminate characters like -,+,?
+
+Checking PROPDMGEXP == B:
+
+```{r, cache=TRUE}
+table(data[data$PROPDMGEXP=='B',]$PROPDMG)
+```
+
+Let's check the extreme PROPDMG=115 case (115*10^9, the biggest value):
+
+```{r, cache=TRUE}
+data[data$PROPDMGEXP=='B' & data$PROPDMG==115,]
+```
+
+It looks like **it's an error and should be M instead of B**.
+I checked other top values for exponents B, 8, 7, 6 and they look fine.
+
+##### 2. Checking CROPDMGEXP
+```{r, cache=TRUE}
+unique(data$CROPDMGEXP)
+```
+I checked several of the highest values here and they seem OK.
+
+#### Checking values of property and crop damages
+
+##### 1. Checking PROPDMG
+
+```{r, cache=TRUE}
+summary(data$PROPDMG)
+```
+
+Values >= 1000 with exponent attached looks suspicious. Let's check them:
+
+```{r, cache=TRUE}
+cond <- data$PROPDMG>=1000
+dc <- data[cond,]
+table(dc$PROPDMG)
+dc <- dc[order(dc$PROPDMG,decreasing=TRUE),]
+dc[1,]
+```
+
+Checking all `r sum(cond)` records with PROPDMG>=1000 shows that all have K exponent.
+I guess <b>it's an error and there should either be 5\*10^3 or 5000\*10^0</b>.
+This should be corrrected.
+
+##### 2. Checking CROPDMG
+
+```{r, cache=TRUE}
+summary(data$CROPDMG)
+```
+
+There are no values above 1000. I checked some top values and they look fine.  
+
+##### 3. Other checks
+
+Other checks show that there are plenty of cases where DMGEXP>0 but no DMG value is provided, both for PROP and CROP. I assume the DMG **in such cases should be corrected to 1**.
+
+### Correcting the data
+
+#### Correcting numerical values
+
+##### 1. Replacing B exponent with M in one case
+
+```{r, cache=TRUE}
+d1 <- subset(data, select = c(EVTYPE,FATALITIES,INJURIES,PROPDMG,PROPDMGEXP,CROPDMG,CROPDMGEXP))
+d1[d1$PROPDMGEXP=='B' & d1$PROPDMG==115,]$PROPDMGEXP <- 'M'
+```
+
+##### 2. Setting exponent=0 for PROPDMG >= 1000
+
+```{r, cache=TRUE}
+d1[d1$PROPDMG >= 1000,]$PROPDMGEXP <- 0
+```
+
+##### 3. Setting exponents=='' to 0
+
+```{r, cache=TRUE}
+d1[d1$PROPDMGEXP=='',]$PROPDMGEXP <- 0
+d1[d1$CROPDMGEXP=='',]$CROPDMGEXP <- 0
+```
+
+##### 4. Replacing letters in exponents with numbers
+
+```{r, warning=FALSE, message=FALSE, cache=TRUE}
+library(plyr)
+exponent_fix <- function (x) {
+    mapvalues(x,
+              from=c('+','-','?','h','H','k','K','m','M','b','B'),
+              to = c(NA, NA, NA, '2','2','3','3','6','6','9','9')
+    )
+}
+d1$PROPDMGEXP = exponent_fix(d1$PROPDMGEXP)
+d1$CROPDMGEXP = exponent_fix(d1$CROPDMGEXP)
+```
+
+##### 5. Eliminating observations with missing values
+
+Some of these observations might be partially complete but I accept this. There are `r sum(!complete.cases(d1))` observations to be removed.
+```{r, cache=TRUE}
+d1 <- na.omit(d1)
+```
+
+##### 6. Changing exponents from factors to numbers
+
+```{r, cache=TRUE}
+d1$PROPDMGEXP <- as.numeric(levels(d1$PROPDMGEXP)[d1$PROPDMGEXP])
+d1$CROPDMGEXP <- as.numeric(levels(d1$CROPDMGEXP)[d1$CROPDMGEXP])
+```
+
+##### 7. Setting DMG=1 where DMG==0 but DMGEXP>0.
+
+There are `r nrow(d1[d1$PROPDMGEXP!=0 & d1$PROPDMG==0,])` such cases for PROP
+and `r nrow(d1[d1$CROPDMGEXP!=0 & d1$CROPDMG==0,])` for CROP
+```{r, cache=TRUE}
+d1[d1$PROPDMGEXP!=0 & d1$PROPDMG==0,]$PROPDMG <- 1
+d1[d1$CROPDMGEXP!=0 & d1$CROPDMG==0,]$CROPDMG <- 1
+```
+
+##### 8. Calculating numerical value of the damages
+
+```{r, cache=TRUE}
+d1$PROPDMGVAL <- d1$PROPDMG*10^d1$PROPDMGEXP
+d1$CROPDMGVAL <- d1$CROPDMG*10^d1$CROPDMGEXP
+```
+
+#### Standardizing the Event Type
+
+Once we have the numerical values for damage calculate we can finally standardize the Event Type variable.
+
+##### 1. Ordering the EVTYPE categories by their impacts.
+
+```{r, cache=TRUE}
+d_ft <- aggregate(FATALITIES~EVTYPE, data=d1, sum)
+d_in <- aggregate(INJURIES~EVTYPE, data=d1, sum)
+d_pr <- aggregate(PROPDMGVAL~EVTYPE, data=d1, sum)
+d_cr <- aggregate(CROPDMGVAL~EVTYPE, data=d1, sum)
+
+dft <- d_ft[order(d_ft$FATALITIES, decreasing=TRUE),]
+din <- d_in[order(d_in$INJURIES, decreasing=TRUE),]
+dpr <- d_pr[order(d_pr$PROPDMGVAL, decreasing=TRUE),]
+dcr <- d_cr[order(d_cr$CROPDMGVAL, decreasing=TRUE),]
+
+dft$EVTYPE <- as.character(dft$EVTYPE)
+din$EVTYPE <- as.character(din$EVTYPE)
+dpr$EVTYPE <- as.character(dpr$EVTYPE)
+dcr$EVTYPE <- as.character(dcr$EVTYPE)
+```
+
+##### 2. Selecting the top EVTYPE categories to be standardized.
+
+Plotting EVTYPE's impact on health (FATALITIES, INJURIES) and economy (Property Damage, Crop Damage).
+
+```{r, fig.width=10}
+plot_damage <- function(df,n=nrow(df)) {
+    all_other <- if(n < nrow(df)) sum(df[(n+1):nrow(df),2]) else 0
+    ymax = max(df[1,2], all_other)
+    plot(df[1:n,2], main=names(df)[2], ylab="Damage", xlab="Event type", ylim=c(0, ymax))
+    if(all_other > 0) abline(h=all_other)
+}
+par(mfrow=c(2,2))
+n = 40
+plot_damage(dft, n)
+plot_damage(din, n)
+plot_damage(dpr, n)
+plot_damage(dcr, n)
+```
+
+The plot shows the damage for top `r n` EVTYPE's for each damage indicator. The horizontal line shows combined damage of all the other EVTYPE's. It seems that **it's enough to standardize the top `r n` EVTYPE's to account for the major event types**.
+The comined damage of the other EVTYPE's shouldn't change the top event types ordering.
+
+Here are all the relevant events:
+
+```{r}
+selected_events = sort(unique(c(
+    dft[1:n,1],
+    din[1:n,1],
+    dpr[1:n,1],
+    dcr[1:n,1])))
+selected_events
+```
+
+There are `r length(selected_events)` of them. We write them into file and create a dictionary where
+each EVTYPE on a list have a standardized Event Type. Additionally we add "Other" event type
+to simplify subsequent calculations.
+
+##### 3. Creating EVTYPE list, standardizing it and creating dictionary from the former to the latter
+
+I wrote the `r length(selected_events)` EVTYPE's into a file and created a dictionary by assigining each of these EVTYPE's a standardized name.
+
+```{r}
+write.table(selected_events, file="dict_keys.txt", row.names=F, col.names=F)
+write.table(events_clean, file="events_clean.txt", row.names=F, col.names=F)
+dict = read.table(file="dict.txt", stringsAsFactors = F, col.names=c("EVTYPE","EVENT_TYPE"))
+dict
+```
+
+Confirming that the dictionary contains all the selected EVTYPE's:
+
+```{r}
+all(sapply(selected_events, function(x) x %in% dict$EVTYPE))
+```
+
+##### 4. Standardizing event types in the data
+
+EVENT_TYPE column contains the standardized name for each EVTYPE in the data.
+
+```{r, cache=TRUE}
+standardize_event_types <- function(df, n = nrow(df)) {
+    for(i in 1:nrow(df)) {
+        if(!any(dict$EVTYPE==df[i,"EVTYPE"])) {
+            df[i,"EVTYPE"] = "other"
+        }
+    }
+    transform(df[1:n,], EVENT_TYPE = mapvalues(df$EVTYPE, dict$EVTYPE, dict$EVENT_TYPE))
+}
+dftst <- standardize_event_types(dft)
+dinst <- standardize_event_types(din)
+dprst <- standardize_event_types(dpr)
+dcrst <- standardize_event_types(dcr)
+```
+
+#### Final data aggregating
+
+Now I aggregate event data and sum up health and economic damages.
+Event types are sorted by their impact.
+The "Other" categories are moved to the last rows of the data frames.
+
+```{r, cache=TRUE}
+dftf <- aggregate(FATALITIES~EVENT_TYPE, data=dftst, sum)
+dinf <- aggregate(INJURIES~EVENT_TYPE, data=dinst, sum)
+dprf <- aggregate(PROPDMGVAL~EVENT_TYPE, data=dprst, sum)
+dcrf <- aggregate(CROPDMGVAL~EVENT_TYPE, data=dcrst, sum)
+# final sorting
+dftfs <- dftf[order(dftf$FATALITIES, decreasing=TRUE),]
+dinfs <- dinf[order(dinf$INJURIES, decreasing=TRUE),]
+dprfs <- dprf[order(dprf$PROPDMGVAL, decreasing=TRUE),]
+dcrfs <- dcrf[order(dcrf$CROPDMGVAL, decreasing=TRUE),]
+# moving "other" to the last row
+put_other_at_the_end <- function(df) {
+    n = nrow(df)
+    other = which(df$EVENT_TYPE=="other")
+    if(other>1 & other<n)
+        index = c(1:(other-1),(other+1):n,other)
+    else if (other==1)
+        index = c(2:n,other)
+    else
+        index = 1:n
+    df[index,]
+}
+dftfs <- put_other_at_the_end(dftfs)
+dinfs <- put_other_at_the_end(dinfs)
+dprfs <- put_other_at_the_end(dprfs)
+dcrfs <- put_other_at_the_end(dcrfs)
+```
+
+Let's plot the most damageing event types for each damage indicator.
+
+```{r, fig.width=10, fig.height=10}
+par(mfrow=c(2,2))
+barplot_with_the_last_record <- function(df, col, n=3) {
+    m = nrow(df)
+    if(n==m)
+        barplot(height = df[,col], names.arg = df$EVENT_TYPE, cex.names=0.7, main=col, ylab="Damage")
+    else
+        barplot(height = df[c(1:n,m),col], names.arg = df$EVENT_TYPE[c(1:n,m)], cex.names=0.7, main=col, ylab="Damage")
+}
+barplot_with_the_last_record(dftfs,"FATALITIES")
+barplot_with_the_last_record(dinfs,"INJURIES")
+barplot_with_the_last_record(dprfs,"PROPDMGVAL")
+barplot_with_the_last_record(dcrfs,"CROPDMGVAL")
+```
+
+The plot shows the resulting ordering of event types.
+We see that **the nonstandardized EVTYPE's combined under "other" category can't change the top ordering of event types**.
+
+## Results
+<!--There should be a section titled Results in which your results are presented.-->
+
+Let's plot event types of the highest health and economic impact.
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyr)
+library(dplyr)
+bind_rows(dftfs, dinfs, dprfs, dcrfs) %>%
+    gather(dimension, damage, -EVENT_TYPE) %>%
+    na.omit %>%
+    spread(dimension, damage) %>%
+    as.data.frame -> d
+rownames(d) <- d$EVENT_TYPE
+d <- subset(d,select=-EVENT_TYPE)
+```
+```{r, fig.width=10, fig.height=10}
+n <- 4
+par(mfrow=c(2,1))
+hc <- c('FATALITIES','INJURIES')
+human <- data.frame(value=rowSums(d[,hc]))
+barplot(t(as.matrix(d[order(human$value,decreasing=T)[1:n],hc])),legend=hc,main="Health Impact")
+ec <- c('PROPDMGVAL','CROPDMGVAL')
+econ <- data.frame(value=rowSums(d[,ec]))
+barplot(t(as.matrix(d[order(econ$value,decreasing=T)[1:n],ec])),legend=ec,main="Economic Impact")
+```
+
+We can see the **the most harmful events in terms of populatino health are by far tornados**.
+Thunderstorm winds, excessive heat and floods occupy the 2nd to 4th positions.
+
+**The most detrimental events for the economy are Hurricanes**, then tornadoes, storm surges/tides and floods.
+
+The same results where arrive at when standardizing only top 20 EVTYPE's for each damage indicator. It required standardizing only 39 EVTYPE's total.
